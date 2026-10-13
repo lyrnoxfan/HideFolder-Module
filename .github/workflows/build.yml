@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + aarch64 musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Unit tests (host)
+        run: cargo test --locked
+        working-directory: rust
+
+      - name: Install musl-tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
+      - name: Build static arm64 binary
+        run: cargo build --locked --release --target aarch64-unknown-linux-musl
+        working-directory: rust
+
+      - name: Inspect binary
+        run: file rust/target/aarch64-unknown-linux-musl/release/hidefolder && ls -la rust/target/aarch64-unknown-linux-musl/release/hidefolder
+
+      - name: Commit binary back to repo
+        run: |
+          cp rust/target/aarch64-unknown-linux-musl/release/hidefolder ./hidefolder
+          chmod 755 ./hidefolder
+          if [ -z "$(git status --porcelain -- ./hidefolder)" ]; then
+            echo "binary unchanged, nothing to commit"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add hidefolder
+            git commit -m "build: 更新 arm64 静态二进制 [skip ci]"
+            git push
+          fi
