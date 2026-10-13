@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +27,8 @@ jobs:
         run: cargo test --locked
         working-directory: rust
 
-      - name: Install musl-tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Install cross linker
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu musl-tools
 
       - name: Build static arm64 binary
         run: cargo build --locked --release --target aarch64-unknown-linux-musl
