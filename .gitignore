@@ -2,3 +2,4 @@
 .DS_Store
 active.txt
 rules.txt
+rust/target/

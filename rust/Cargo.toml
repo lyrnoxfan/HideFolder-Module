@@ -1,0 +1,14 @@
+[package]
+name = "hidefolder"
+version = "2.0.0"
+edition = "2021"
+description = "HideFolder Magisk/KernelSU/APatch 模块后端：bind mount 隐藏文件夹"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+
+[dependencies]
+libc = "0.2"

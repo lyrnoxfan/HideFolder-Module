@@ -7,13 +7,24 @@
 - 📁 **隐藏文件夹**：用空目录 bind mount 覆盖目标文件夹，文件本身不受任何影响
 - ↩️ **随时恢复**：禁用 / 删除规则立即 `umount` 恢复；卸载模块时自动恢复全部
 - 🌍 **全局隐藏**：开机早期（zygote 启动前）挂载，对所有应用生效
-- 📱 **按应用隐藏**：用 `nsenter` 进入目标应用的 mount namespace 单独挂载，其他应用不受影响
+- 📱 **按应用隐藏**：用 `setns` 进入目标应用的 mount namespace 单独挂载，其他应用不受影响
 - 🖥️ **WebUI 管理**：添加 / 删除 / 启用 / 禁用规则，所见即所得
 - 🔄 **后台补应用**：新启动的目标应用约 2 分钟内自动补上隐藏
+- 🩺 **本机自检**：WebUI 里点「运行本机自检」，逐项检查 root / 命名空间 / 挂载能力并给出确切原因
+
+## 架构（v2.0）
+
+全部逻辑由单个静态 Rust 二进制 `hidefolder`（musl arm64，约几百 KB）实现，
+替代了旧版的 shell 脚本。shell 只剩开机钩子 stub（Magisk 要求钩子必须是 shell
+脚本）和安装脚本。直接调 `mount(2)` / `setns(2)`，不依赖 `nsenter`，
+失败时返回确切的 errno 而不是模糊的"命令执行失败"。
+
+磁盘格式与旧版完全兼容（`rules.txt` / `active.txt` / `hidefolder.log`），
+升级无需迁移。
 
 ## 安装
 
-1. 下载本仓库的 zip（或自行打包：`zip -r HideFolder.zip * -x '*.git*'`，注意压缩包根目录直接是 `module.prop` 等文件）
+1. 下载本仓库的 zip（根目录直接是 `module.prop` 等文件）
 2. 在 Magisk / KernelSU / APatch 的模块页面选择「从本地安装」
 3. 重启手机
 4. 在模块的 WebUI（或 MMRL / WebUI X）中打开 HideFolder 管理规则
@@ -25,21 +36,22 @@
 - **添加规则**：填写要隐藏的文件夹绝对路径（如 `/sdcard/DCIM/私密相册`），选择「全局隐藏」或「仅对某个应用」并填写包名（如 `com.tencent.mm`）
 - **启用 / 禁用**：点规则旁的开关，禁用立即恢复，启用立即隐藏
 - **删除**：删除规则的同时恢复该文件夹
-- **应用全部 / 恢复全部**：一键操作
+- **应用全部 / 恢复全部 / 运行本机自检**：一键操作
 
 ### 命令行（adb shell / 终端，root）
 
 ```sh
-CLI=/data/adb/modules/hidefolder/scripts/cli.sh
-sh $CLI list                    # 列出规则（id|启用|范围|路径）
-sh $CLI add global /sdcard/私密  # 添加全局规则
-sh $CLI add com.tencent.mm /sdcard/Download/xxx  # 添加按应用规则
-sh $CLI toggle <id>             # 启用/禁用切换
-sh $CLI enable <id> / sh $CLI disable <id>
-sh $CLI del <id>                # 删除规则并恢复
-sh $CLI apply                   # 应用全部启用中的规则
-sh $CLI restore                 # 恢复全部隐藏
-sh $CLI status                  # 规则数 / 已启用 / 隐藏中
+HF=/data/adb/modules/hidefolder/hidefolder
+$HF list                    # 列出规则（id|启用|范围|路径）
+$HF add global /sdcard/私密  # 添加全局规则
+$HF add com.tencent.mm /sdcard/Download/xxx  # 添加按应用规则
+$HF toggle <id>             # 启用/禁用切换
+$HF enable <id> / $HF disable <id>
+$HF del <id>                # 删除规则并恢复
+$HF apply                   # 应用全部启用中的规则
+$HF restore                 # 恢复全部隐藏
+$HF status                  # 规则数 / 已启用 / 隐藏中
+$HF doctor                  # 本机自检：root/ns/挂载能力逐项诊断
 ```
 
 规则保存在 `/data/adb/modules/hidefolder/rules.txt`，格式为 `id|enabled|scope|path`，
@@ -48,8 +60,8 @@ sh $CLI status                  # 规则数 / 已启用 / 隐藏中
 ## 原理
 
 ```
-隐藏：mount -o bind <模块空目录> <目标文件夹>   → 目标看起来是空的
-恢复：umount -l <目标文件夹>                    → 文件原样回来
+隐藏：mount(MS_BIND, <模块空目录>, <目标文件夹>)  → 目标看起来是空的
+恢复：umount2(MNT_DETACH, <目标文件夹>)           → 文件原样回来
 ```
 
 Android 有三个特殊点，模块都处理了：
@@ -67,37 +79,52 @@ Android 有三个特殊点，模块都处理了：
    （注意：早期版本用过 `content delete` 清理，经验证它会连文件一起删除，
    已彻底移除，改用上述安全方式。）
 
-按应用隐藏通过 `nsenter -t <pid> -m` 进入该应用的 mount namespace 执行挂载，
-只影响该应用。注意：媒体库是全局共享的，按应用隐藏对走 MediaStore 读图的
-应用（如相册类）无效，要彻底隐藏请用全局规则。
+按应用隐藏通过 `setns` 进入该应用的 mount namespace 执行挂载，只影响该应用。
+注意：媒体库是全局共享的，按应用隐藏对走 MediaStore 读图的应用（如相册类）
+无效，要彻底隐藏请用全局规则。
 
-**失败熔断**：如果挂载一处都没成功（如 WebUI 环境无挂载权限），规则会保存
-但不上报"已隐藏"，也不碰媒体库；重启手机后由开机脚本（真 root 环境）自动
-应用。所有操作幂等，重复执行无副作用；挂载失败的具体原因记在 `hidefolder.log`。
+**失败熔断**：如果挂载一处都没成功，规则会保存但如实报告失败原因（带 errno），
+不碰媒体库；重启手机后由开机脚本（真 root 环境）自动应用。所有操作幂等，
+重复执行无副作用；详细日志在 `hidefolder.log`。
 
 ## 文件结构
 
 ```
 HideFolder/
 ├── module.prop          模块元信息
-├── customize.sh         安装脚本
-├── post-fs-data.sh      开机早期：应用全局隐藏
-├── service.sh           开机后期：补应用 + 后台守护
-├── uninstall.sh         卸载时自动恢复全部
-├── scripts/
-│   ├── common.sh        挂载/恢复核心函数
-│   ├── apply.sh         按规则应用隐藏
-│   ├── restore.sh       恢复全部
-│   └── cli.sh           WebUI/命令行后端
+├── hidefolder           arm64 静态二进制（CI 构建后提交）
+├── customize.sh         安装脚本（含二进制可执行自检）
+├── post-fs-data.sh      开机早期：应用全局隐藏（stub）
+├── service.sh           开机后期：补应用 + 启动 Rust 守护进程（stub）
+├── uninstall.sh         卸载时自动恢复全部（stub + 兜底）
+├── rust/                Rust 工程（cargo）
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs      CLI / 规则 / 隐藏恢复逻辑
+│       └── mnt.rs       mount(2) / setns 底层封装
 ├── webroot/
 │   └── index.html       WebUI（清爽蓝 iOS 风格）
+├── .github/workflows/
+│   └── build.yml        CI：构建 arm64 静态二进制并提交回仓库
 └── README.md
+```
+
+## 构建
+
+二进制由 GitHub Actions 自动构建（`aarch64-unknown-linux-musl` 静态），
+push 到 main 后自动编译并提交回仓库，无需本地交叉编译。
+
+本地只做逻辑验证：
+
+```sh
+cd rust && cargo test        # 单元测试
+cargo check --target aarch64-unknown-linux-musl  # 交叉目标类型检查
 ```
 
 ## 注意事项
 
 - 隐藏的是**文件夹本身**（看起来是空目录），不会删除或修改任何文件
-- 按应用隐藏依赖 `nsenter` / `pidof`（Android 自带 toybox 一般都有）
+- 按应用隐藏按包名匹配进程 `cmdline`（`comm` 截断名兜底）
 - 某些 ROM 的多开 / 应用双开进程名可能不同，规则按包名匹配主进程
 - 卸载模块前建议先在 WebUI 点「恢复全部」（即使忘了，`uninstall.sh` 也会自动恢复）
 

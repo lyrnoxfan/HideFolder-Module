@@ -102,6 +102,12 @@
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .loading { text-align: center; color: var(--text-2); padding: 30px 0; }
+  #doctor-out {
+    display: none; margin-top: 12px; padding: 12px 14px;
+    background: var(--blue-light); border-radius: 14px;
+    font-family: ui-monospace, "Noto Sans Mono", monospace; font-size: 12.5px;
+    color: var(--text); white-space: pre-wrap; word-break: break-all;
+  }
 </style>
 </head>
 <body>
@@ -138,6 +144,8 @@
   <div id="rule-list"><div class="loading">加载中…</div></div>
   <button class="btn ghost" onclick="applyAll()">↻ 应用全部启用中的规则</button>
   <button class="btn danger-ghost" onclick="restoreAll()">恢复全部隐藏</button>
+  <button class="btn ghost" onclick="runDoctor()">🩺 运行本机自检</button>
+  <pre id="doctor-out"></pre>
 </div>
 
 <div class="card">
@@ -148,6 +156,7 @@
     <li>仅对某个应用隐藏时，只屏蔽该应用的文件直接访问；走系统媒体库读图的应用仍可能看到（媒体库是全局共享的），要彻底隐藏请用全局。</li>
     <li>禁用 / 删除规则会立即 umount 恢复；卸载模块时也会自动恢复全部。</li>
     <li>新启动的目标应用由后台服务自动补应用隐藏（约 2 分钟内）。</li>
+    <li>隐藏没效果时点「运行本机自检」，它会逐项检查 root / 命名空间 / 挂载能力并给出确切原因。</li>
   </ul>
 </div>
 
@@ -160,13 +169,13 @@ let _cli = null;
 async function getCli() {
   if (_cli) return _cli;
   const probe = 'for d in /data/adb/modules/hidefolder /data/adb/apd/modules/hidefolder; do'
-    + ' [ -f "$d/scripts/cli.sh" ] && { echo "$d"; break; }; done';
+    + ' [ -f "$d/hidefolder" ] && { echo "$d"; break; }; done';
   let dir = '';
   try {
     const r = await suExec(probe);
     if (r.errno === 0) dir = r.stdout.split('\n')[0].trim();
   } catch (e) { /* ksu 不可用时保持默认路径，外层会报友好错误 */ }
-  _cli = (dir ? dir : '/data/adb/modules/hidefolder') + '/scripts/cli.sh';
+  _cli = (dir ? dir : '/data/adb/modules/hidefolder') + '/hidefolder';
   return _cli;
 }
 let scope = 'global';
@@ -198,7 +207,7 @@ async function suExec(cmd) {
   }
   try {
     const r = await rawExec(cmd);
-    // 不在这里按 errno 抛错：cli.sh 的业务错误（ERR|xxx）也是 exit 1，
+    // 不在这里按 errno 抛错：hidefolder 的业务错误（ERR|xxx）也是 exit 1，
     // 具体原因在 stdout 里，要透传给调用方解析
     return { errno: r.errno, stdout: String(r.stdout).trim(), stderr: String(r.stderr).trim(), cmd };
   } catch (e) {
@@ -226,8 +235,8 @@ async function refresh() {
   try {
     const cli = await getCli();
     const [listR, statusR] = await Promise.all([
-      suExec('sh ' + esc(cli) + ' list'),
-      suExec('sh ' + esc(cli) + ' status')
+      suExec(esc(cli) + ' list'),
+      suExec(esc(cli) + ' status')
     ]);
     if (listR.errno !== 0 || statusR.errno !== 0) {
       const bad = listR.errno !== 0 ? listR : statusR;
@@ -272,7 +281,7 @@ function renderRules(out) {
 
 async function runCli(args, okMsg) {
   try {
-    const r = await suExec('sh ' + esc(await getCli()) + ' ' + args);
+    const r = await suExec(esc(await getCli()) + ' ' + args);
     const line = (r.stdout.split('\n').pop() || '').trim();
     if (line.startsWith('ERR|')) { toast(line.slice(4)); return false; }
     if (r.errno !== 0) { toast(fmtErr(r)); return false; }
@@ -303,7 +312,7 @@ async function addRule() {
 
 async function toggleRule(id, on) {
   try {
-    const r = await suExec('sh ' + esc(await getCli()) + (on ? ' enable ' : ' disable ') + esc(String(id)));
+    const r = await suExec(esc(await getCli()) + (on ? ' enable ' : ' disable ') + esc(String(id)));
     const line = (r.stdout.split('\n').pop() || '').trim();
     if (line.startsWith('ERR|')) toast(line.slice(4));
     else if (r.errno !== 0) toast(fmtErr(r));
@@ -324,6 +333,18 @@ async function applyAll() {
 
 async function restoreAll() {
   if (await runCli('restore')) refresh();
+}
+
+async function runDoctor() {
+  const out = document.getElementById('doctor-out');
+  out.style.display = 'block';
+  out.textContent = '自检中…';
+  try {
+    const r = await suExec(esc(await getCli()) + ' doctor');
+    out.textContent = r.stdout || ('errno=' + r.errno + (r.stderr ? '\n' + r.stderr : ''));
+  } catch (e) {
+    out.textContent = '自检失败：' + e.message;
+  }
 }
 
 refresh();
